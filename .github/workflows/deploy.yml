@@ -1,0 +1,142 @@
+name: Deploy Discord Bot
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  # Deploy to Google Cloud Run
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Google Cloud CLI
+      uses: google-github-actions/setup-gcloud@v1
+      with:
+        project_id: ${{ secrets.GOOGLE_CLOUD_PROJECT_ID }}
+        service_account_key: ${{ secrets.GOOGLE_CLOUD_SA_KEY }}
+    
+    - name: Configure Docker for GCR
+      run: gcloud auth configure-docker
+    
+    - name: Build and push Docker image
+      run: |
+        docker build -t gcr.io/${{ secrets.GOOGLE_CLOUD_PROJECT_ID }}/discord-summarize-bot:${{ github.sha }} .
+        docker build -t gcr.io/${{ secrets.GOOGLE_CLOUD_PROJECT_ID }}/discord-summarize-bot:latest .
+        docker push gcr.io/${{ secrets.GOOGLE_CLOUD_PROJECT_ID }}/discord-summarize-bot:${{ github.sha }}
+        docker push gcr.io/${{ secrets.GOOGLE_CLOUD_PROJECT_ID }}/discord-summarize-bot:latest
+    
+    - name: Deploy to Cloud Run
+      run: |
+        gcloud run deploy discord-summarize-bot \
+          --image gcr.io/${{ secrets.GOOGLE_CLOUD_PROJECT_ID }}/discord-summarize-bot:${{ github.sha }} \
+          --platform managed \
+          --region us-central1 \
+          --allow-unauthenticated \
+          --set-env-vars="DISCORD_PUBLIC_KEY=${{ secrets.DISCORD_PUBLIC_KEY }}" \
+          --set-env-vars="DISCORD_APPLICATION_ID=${{ secrets.DISCORD_APPLICATION_ID }}" \
+          --set-env-vars="DISCORD_BOT_TOKEN=${{ secrets.DISCORD_BOT_TOKEN }}" \
+          --set-env-vars="GOOGLE_CLOUD_PROJECT_ID=${{ secrets.GOOGLE_CLOUD_PROJECT_ID }}" \
+          --service-account=discord-bot-sa@${{ secrets.GOOGLE_CLOUD_PROJECT_ID }}.iam.gserviceaccount.com \
+          --memory 512Mi \
+          --cpu 1 \
+          --max-instances 10
+    
+    - name: Get service URL
+      id: get-url
+      run: |
+        SERVICE_URL=$(gcloud run services describe discord-summarize-bot --region=us-central1 --format="value(status.url)")
+        echo "service_url=$SERVICE_URL" >> $GITHUB_OUTPUT
+    
+    - name: Test deployed service
+      run: |
+        SERVICE_URL=${{ steps.get-url.outputs.service_url }}
+        echo "Testing deployed service at: $SERVICE_URL"
+        
+        # Wait for service to be ready
+        sleep 30
+        
+        # Test health endpoint
+        curl -f "$SERVICE_URL/health" || exit 1
+        
+        # Test Discord ping endpoint
+        curl -X POST "$SERVICE_URL/discord/interactions" \
+          -H "Content-Type: application/json" \
+          -H "x-signature-ed25519: test" \
+          -H "x-signature-timestamp: $(date +%s)" \
+          -d '{"type":1}' || exit 1
+    
+    - name: Create deployment summary
+      run: |
+        SERVICE_URL=${{ steps.get-url.outputs.service_url }}
+        echo "## 🚀 Deployment Successful!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Service URL:** $SERVICE_URL" >> $GITHUB_STEP_SUMMARY
+        echo "**Discord Interaction Endpoint:** $SERVICE_URL/discord/interactions" >> $GITHUB_STEP_SUMMARY
+        echo "**Health Check:** $SERVICE_URL/health" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Next Steps:" >> $GITHUB_STEP_SUMMARY
+        echo "1. Update your Discord application's interaction endpoint URL" >> $GITHUB_STEP_SUMMARY
+        echo "2. Test the bot with /summarize command" >> $GITHUB_STEP_SUMMARY
+        echo "3. Monitor logs with: gcloud logs tail --service=discord-summarize-bot" >> $GITHUB_STEP_SUMMARY
+
+  # Post-deployment tests
+  post-deployment-tests:
+    runs-on: ubuntu-latest
+    needs: deploy
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.11
+    
+    - name: Install test dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests pytest
+    
+    - name: Run post-deployment tests
+      run: |
+        SERVICE_URL=${{ needs.deploy.outputs.service_url }}
+        
+        # Test health endpoint
+        python -c "
+        import requests
+        import time
+        
+        # Wait for service to be fully ready
+        time.sleep(60)
+        
+        # Test health endpoint
+        response = requests.get('$SERVICE_URL/health', timeout=30)
+        assert response.status_code == 200
+        data = response.json()
+        assert data['status'] == 'healthy'
+        print('✅ Health endpoint working')
+        
+        # Test Discord ping
+        import json
+        payload = {'type': 1}
+        headers = {
+            'Content-Type': 'application/json',
+            'x-signature-ed25519': 'test',
+            'x-signature-timestamp': str(int(time.time()))
+        }
+        
+        response = requests.post(
+            '$SERVICE_URL/discord/interactions',
+            json=payload,
+            headers=headers,
+            timeout=30
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data['type'] == 1
+        print('✅ Discord ping working')
+        "
