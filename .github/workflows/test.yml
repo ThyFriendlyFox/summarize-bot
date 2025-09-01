@@ -45,6 +45,8 @@ jobs:
     
     - name: Run unit tests
       run: |
+        # Add current directory to Python path
+        export PYTHONPATH="${PYTHONPATH}:${PWD}"
         pytest tests/unit/ -v --cov=main --cov-report=xml --cov-report=html
     
     - name: Upload coverage to Codecov
@@ -75,6 +77,8 @@ jobs:
     
     - name: Run integration tests
       run: |
+        # Add current directory to Python path
+        export PYTHONPATH="${PYTHONPATH}:${PWD}"
         pytest tests/integration/ -v
       env:
         DISCORD_PUBLIC_KEY: ${{ secrets.DISCORD_PUBLIC_KEY }}

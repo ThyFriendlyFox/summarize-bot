@@ -2,8 +2,15 @@ import pytest
 import asyncio
 import json
 import os
+import sys
+from pathlib import Path
 from unittest.mock import Mock, patch, AsyncMock
 from fastapi.testclient import TestClient
+
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
 from main import app
 
 class TestDiscordWebhookIntegration:
